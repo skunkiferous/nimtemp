@@ -10,6 +10,8 @@ import options
 import rekjister
 import tekst
 
+export hash, `==`, id
+
 type
   TypeInfoIntern[M] = object
     ## "internal" type-information type
@@ -71,7 +73,7 @@ proc initTypeRegister*(M: typedesc, src: openArray[TypeInfo[M]]): TypeRegister[M
   result = initTypeRegister(M, src)
 
 proc deinitTypeRegister*[M](reg: var TypeRegister[M]) =
-  ## Returns a type's type-info, if present.
+  ## Frees memory used by the type register.
   deinitRegister(reg, deinitTypeInfo[M])
 
 proc find*[M](reg: var TypeRegister[M], T: typedesc): Option[TypeInfo[M]] {.inline, noSideEffect.} =

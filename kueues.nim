@@ -28,6 +28,9 @@ import typerekjister
 
 import ./kueues_config
 
+export hash, `==`
+
+
 when DEBUG_QUEUES:
   from gethutil import toBin
   echo("DEBUG_QUEUES: " & $DEBUG_QUEUES)
@@ -43,7 +46,7 @@ static:
   assert(isPowerOfTwo(MAX_THREADS), "MAX_THREADS must be power of two: " & $MAX_THREADS)
   assert((MAX_THREADS <= 256), "MAX_THREADS currently limited to 256: " & $MAX_THREADS)
 
-when USE_TIMESTAMPS:
+when USE_TOPICS:
   static:
     assert(isPowerOfTwo(MAX_TOPICS), "MAX_TOPICS must be power of two: " & $MAX_TOPICS)
     assert((int64(MAX_THREADS) * MAX_TOPICS < high(int32)), "MAX_TOPICS too big: " & $MAX_TOPICS)
@@ -110,7 +113,10 @@ type
 when USE_TOPICS:
   type
     TopicID* = range[0..MAX_TOPICS-1]
-      ## QueueID, within thread.
+      ## TopicID, within thread.
+      ## Hint, since the "getter" for ThreadID is "tid()", the "getter" for
+      ## TopicID is "cid()", as in "category ID".
+      ## If you hav a better getter name, say so!
     QueueID* = distinct uint32
       ## The complete queue ID, containing the process ID, thread ID, and topic ID.
 else:
@@ -119,7 +125,16 @@ else:
       ## The complete queue ID, containing the process ID and thread ID.
 
 proc `==` *(a, b: QueueID): bool {.borrow.}
-proc `$` *(a: QueueID): string {.borrow.}
+
+when USE_TYPE_ID:
+  type
+    MsgTypeID* = distinct uint16
+      ## We assume a limited number of message types, because it would
+      ## otherwise increase our message size, which maters when we send them
+      ## over the network.
+
+  proc `==` *(a, b: MsgTypeID): bool {.borrow.}
+  proc `$` *(mtid: MsgTypeID): string {.borrow.}
 
 when DEBUG_QUEUES:
   echo("ThreadID: range[0.." & $(MAX_THREADS-1) & "]")
@@ -128,26 +143,51 @@ when DEBUG_QUEUES:
     echo("TopicID: range[0.." & $(MAX_TOPICS-1) & "]")
   echo("QueueID: uint" & $(8 * sizeof(QueueID)))
 
+when USE_TIMESTAMPS:
+  const TS_SIZE = sizeof(Timestamp)
+  static:
+    assert((TS_SIZE == 4) or (TS_SIZE == 8) or (TS_SIZE == 16), "sizeof(Timestamp) expected to be 4/8/16")
+    # Timestamp size expected to be 4 or 8 bytes, possibly platform dependent.
+    # Timestamp of size 16 concievable, if some combination of real-time and
+    # counters is used.
+  const USE_BIG_TIMESTAMPS: bool = USE_TIMESTAMPS and (TS_SIZE >= 8)
+  const USE_SMALL_TIMESTAMPS: bool = USE_TIMESTAMPS and (TS_SIZE < 8)
+
 type
   MsgBase* = object
     ## The base of a message, without the "content"
+    when USE_BIG_TIMESTAMPS:
+      timestamp: Timestamp
+        ## The message creation timestamp
+        ## User-defined size; assumed 8/16 bytes in this case.
+        ## Put before pointers, because we want the fields sorted by size,
+        ## and it is either the same, or bigger.
     previous: ptr[MsgBase]
       ## The previous message sent to this queue, if any.
       ## Should not be visible from API consumers.
+      ## Platform-dependent; assumed 8 bytes in 64-bits and otherwise 4 bytes.
+    when TWO_WAY_MESSAGING:
+      request: ptr[MsgBase]
+        ## The request message to which this message answers, if any.
+        ## Platform-dependent; assumed 8 bytes in 64-bits and otherwise 4 bytes.
+    when USE_SMALL_TIMESTAMPS:
+      timestamp: Timestamp
+        ## The message creation timestamp
+        ## User-defined size; assumed 4 bytes in this case.
+        ## Put after pointers, because we want the fields sorted by size,
+        ## and it is either the same, or smaller.
     when TWO_WAY_MESSAGING:
       sender*: QueueID
         ## The message sender. Only defined for two-way messaging.
-      request: ptr[MsgBase]
-        ## The request message to which this message answers, if any.
+        ## Should be 4 bytes with "topics", and 2 otherwise.
     when USE_TOPICS:
       receiver*: QueueID
         ## The message receiver. Implicit, unless we use topics
-    when USE_TIMESTAMPS:
-      timestamp: Timestamp
-        ## The message creation timestamp
+        ## Should be 4 bytes with "topics", and 2 otherwise.
     when USE_TYPE_ID:
-      typeid: TypeID
-        ## The message type ID
+      typeid: MsgTypeID
+        ## The message type ID.
+        ## Should always be 2 bytes.
 
   Msg*[T: not (ref|string|seq)] = object
     ## A message with it's content
@@ -171,13 +211,22 @@ when USE_TOPICS:
     ## Think of cid() as "category ID" ...
     TopicID((uint32(queue) shr THREAD_AND_PROCESS_BITS) and TOPIC_ID_MASK)
 
-  proc queue*(processID: ProcessID, threadID: ThreadID, topicID: TopicID): QueueID {.inline.} =
+  proc queueID*(processID: ProcessID, threadID: ThreadID, topicID: TopicID): QueueID {.inline.} =
     ## Returns the QueueID of a ThreadID in a ProcessID
     QueueID(uint32(threadID) or uint32(processID shl THREAD_BITS) or uint32(topicID shl THREAD_AND_PROCESS_BITS))
+
+  proc `$` *(queue: QueueID): string =
+    ## String representation of a QueueID.
+    $pid(queue) & "." & $tid(queue) & "." & $cid(queue)
+
 else:
-  proc queue*(processID: ProcessID, threadID: ThreadID): QueueID {.inline.} =
+  proc queueID*(processID: ProcessID, threadID: ThreadID): QueueID {.inline.} =
     ## Returns the QueueID of a ThreadID in a ProcessID
     QueueID(uint16(threadID) or uint16(processID shl THREAD_BITS))
+
+  proc `$` *(queue: QueueID): string =
+    ## String representation of a QueueID.
+    $pid(queue) & "." & $tid(queue)
 
 declVolatile(myProcessGlobalID, int, UNINIT_PROCESS_ID)
 # My own (global) process ID
@@ -226,9 +275,9 @@ when USE_TOPICS:
 proc myQueueID*(): QueueID {.inline.} =
   ## My QueueID
   when USE_TOPICS:
-    queue(myProcessID(), myThreadID(), myTopicID())
+    queueID(myProcessID(), myThreadID(), myTopicID())
   else:
-    queue(myProcessID(), myThreadID())
+    queueID(myProcessID(), myThreadID())
 
 
 declVolatileArray(threadQueues, ptr[MsgBase], MAX_THREADS)
@@ -253,11 +302,11 @@ proc sendMsg2[T](q: QueueID, m: ptr[Msg[T]]): void =
     discard
 
 when USE_TYPE_ID:
-  proc idOfType*(T: typedesc): TypeID {.inline.} =
+  proc idOfType*(T: typedesc): MsgTypeID {.inline.} =
     ## Returns the ID of a type.
-    # FIXME!
-    messageTypeRegister.get(T).id()
-    #TypeID(hash(T.name))
+    let tid = messageTypeRegister.get(T).id()
+    assert(int64(tid) <= int64(high(MsgTypeID)))
+    MsgTypeID(tid)
 
   proc sendMsg*[T](q: QueueID, m: ptr[Msg[T]]): void {.inline.} =
     ## Sends a message. m cannot be nil.
@@ -306,7 +355,6 @@ proc recvMsg*(waitInSecs: float, wait: proc (s: int): void = sleep): seq[ptr[Msg
     result.add(m)
     m = m.previous
 
-
 when isMainModule:
   echo("TESTING message queues ...")
 
@@ -322,9 +370,9 @@ when isMainModule:
   var dst: QueueID
   when USE_TOPICS:
     initTopicID(33)
-    dst = queue(myProcessID(), ThreadID(1), TopicID(99))
+    dst = queueID(myProcessID(), ThreadID(1), TopicID(99))
   else:
-    dst = queue(myProcessID(), ThreadID(1))
+    dst = queueID(myProcessID(), ThreadID(1))
   sendMsg(dst, addr m)
 
   proc receiver() {.thread.} =

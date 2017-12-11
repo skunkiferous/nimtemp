@@ -2,6 +2,8 @@
 
 import hashes
 
+export hash, `==`
+
 ## This module can be used, when using "text" as a table key (both hashed and
 ## sorted), stored on the shared heap. One can create a SharedText using a
 ## "local" cstring, so that no shared heap allocation is needed to query a

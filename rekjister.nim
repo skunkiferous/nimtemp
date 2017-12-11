@@ -15,6 +15,8 @@ import sets
 import diktionary
 import vektor
 
+export hash, `==`
+
 type
   RegistrationID* = uint32
       ## The unique registration ID
@@ -38,6 +40,9 @@ type
     lock: Lock
       ## Lock to allow multi-threaded use.
   Cleaner*[K,V] = proc (id: RegistrationID, key: var K, value: var V): void {.nimcall.}
+
+const UNREGISTERED*: RegistrationID = high(RegistrationID)
+  ## Can be used as RegistrationID, to signify something is not registered (yet).
 
 template withLk(t, x: untyped) =
   acquire(t.lock)
