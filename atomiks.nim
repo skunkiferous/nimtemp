@@ -70,6 +70,22 @@ when declared(atomicLoadN):
     ## True is returned if desired is written at p. False is returned otherwise,
     atomicCompareExchangeN(cast[ptr[T]](p), expected, desired, false, ATOMIC_SEQ_CST, ATOMIC_RELAXED)
 
+  proc atomicIncRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = cast[T](1)): T =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    ## Performed in RELAXED/No-Fence memory-model.
+    when (sizeof(T) == 8) or (sizeof(T) == 4):
+      cast[T](atomicAddFetch(cast[ptr[T]](p), x, ATOMIC_RELAXED))
+    else:
+      static: assert(false, "invalid parameter size: " & $sizeof(T))
+
+  proc atomicDecRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = cast[T](1)): T =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    ## Performed in RELAXED/No-Fence memory-model.
+    when (sizeof(T) == 8) or (sizeof(T) == 4):
+      cast[T](atomicSubFetch(cast[ptr[T]](p), x, ATOMIC_RELAXED))
+    else:
+      static: assert(false, "invalid parameter size: " & $sizeof(T))
+
 elif defined(vcc) and hasThreadSupport:
   # Windows...
 
@@ -118,6 +134,18 @@ elif defined(vcc) and hasThreadSupport:
       {.importcpp: "_InterlockedCompareExchange16(static_cast<short volatile *>(#), #, #)", header: "<intrin.h>".}
     proc interlockedCompareExchange8(p: pointer; exchange, comparand: int8): int8
       {.importcpp: "_InterlockedCompareExchange8(static_cast<char volatile *>(#), #, #)", header: "<intrin.h>".}
+
+    proc interlockedExchangeAdd64(p: pointer; val: int64): int64
+      {.importcpp: "_InterlockedExchangeAdd64(static_cast<__int64 volatile *>(#), #)", header: "<windows.h>".}
+    proc interlockedExchangeAdd32(p: pointer; val: int32): int32
+      {.importcpp: "_InterlockedExchangeAdd(static_cast<long volatile *>(#), #)", header: "<windows.h>".}
+
+    # These two are only available on Windows 8+, so Windows 7 is dead!
+    proc interlockedExchangeAddNoFence64(p: pointer; val: int64): int64
+      {.importcpp: "_InterlockedExchangeAddNoFence64(static_cast<__int64 volatile *>(#), #)", header: "<windows.h>".}
+    proc interlockedExchangeAddNoFence32(p: pointer; val: int32): int32
+      {.importcpp: "_InterlockedExchangeAddNoFence(static_cast<long volatile *>(#), #)", header: "<windows.h>".}
+
   else:
     proc interlockedOr64(p: pointer; value: int64): int64
       {.importc: "_InterlockedOr64", header: "<intrin.h>".}
@@ -145,6 +173,17 @@ elif defined(vcc) and hasThreadSupport:
       {.importc: "_InterlockedCompareExchange16", header: "<intrin.h>".}
     proc interlockedCompareExchange8(p: pointer; exchange, comparand: int8): int8
       {.importc: "_InterlockedCompareExchange8", header: "<intrin.h>".}
+
+    proc interlockedExchangeAdd64(p: pointer, val: int64): int64
+      {.importc: "_InterlockedExchangeAdd64", header: "<windows.h>".}
+    proc interlockedExchangeAdd32(p: pointer, val: int32): int32
+      {.importc: "_InterlockedExchangeAdd", header: "<windows.h>".}
+
+    # These two are only available on Windows 8+, so Windows 7 is dead!
+    proc interlockedExchangeAddNoFence64(p: pointer, val: int64): int64
+      {.importc: "_InterlockedExchangeAddNoFence64", header: "<windows.h>".}
+    proc interlockedExchangeAddNoFence32(p: pointer, val: int32): int32
+      {.importc: "_InterlockedExchangeAddNoFence", header: "<windows.h>".}
 
   proc atomicLoadFull*[T: AtomType](p: VolatilePtr[T]): T {.inline.} =
     ## This proc implements an atomic load operation. It returns the contents at p.
@@ -199,6 +238,58 @@ elif defined(vcc) and hasThreadSupport:
       static: assert(false, "invalid parameter size: " & $sizeof(T))
     expected[] = current
     current == oldVal
+
+  proc atomicIncFull*[T: AtomType](p: VolatilePtr[T], x: T = 1.int32): T =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    let pp = cast[pointer](p)
+    when sizeof(T) == 8:
+      cast[T](interlockedExchangeAdd64(pp, cast[int64](x))) + x
+    elif sizeof(T) == 4:
+      cast[T](interlockedExchangeAdd32(pp, cast[int32](x))) + x
+    else:
+      static: assert(false, "invalid parameter size: " & $sizeof(T))
+
+  proc atomicDecFull*[T: AtomType](p: VolatilePtr[T], x: T = 1.int32): T =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    let pp = cast[pointer](p)
+    when sizeof(T) == 8:
+      cast[T](interlockedExchangeAdd64(pp, -cast[int64](x))) - x
+    elif sizeof(T) == 4:
+      cast[T](interlockedExchangeAdd32(pp, -cast[int32](x))) - x
+    else:
+      static: assert(false, "invalid parameter size: " & $sizeof(T))
+
+  proc atomicIncRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = 1.int32): T =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    ## Performed in RELAXED/No-Fence memory-model.
+    ## Will only compile on Windows 8+!
+    # XXX interlockedExchangeAddNoFence() is a lie! It doesn't actually exist!
+    atomicIncFull(p,x)
+    #[
+    let pp = cast[pointer](p)
+    when sizeof(T) == 8:
+      cast[T](interlockedExchangeAddNoFence64(pp, cast[int64](x))) + x
+    elif sizeof(T) == 4:
+      cast[T](interlockedExchangeAddNoFence32(pp, cast[int32](x))) + x
+    else:
+      static: assert(false, "invalid parameter size: " & $sizeof(T))
+    ]#
+
+  proc atomicDecRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = 1.int32): T =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    ## Performed in RELAXED/No-Fence memory-model.
+    ## Will only compile on Windows 8+!
+    # XXX interlockedExchangeAddNoFence() is a lie! It doesn't actually exist!
+    atomicDecFull(p,x)
+    #[
+    let pp = cast[pointer](p)
+    when sizeof(T) == 8:
+      cast[T](interlockedExchangeAddNoFence64(pp, -cast[int64](x))) - x
+    elif sizeof(T) == 4:
+      cast[T](interlockedExchangeAddNoFence32(pp, -cast[int32](x))) - x
+    else:
+      static: assert(false, "invalid parameter size: " & $sizeof(T))
+    ]#
 
 else:
   static:

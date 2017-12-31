@@ -11,10 +11,14 @@ var my_short: int16 = 42'i16
 var my_uint: uint32 = 42'u32
 var my_long: int64 = 42'i64
 
+
 declVolatile(my_vbyte_ptr, byte, 42'u8)
 declVolatile(my_vshort_ptr, int16, 42'i16)
 declVolatile(my_vuint_ptr, uint32, 42'u32)
 declVolatile(my_vlong_ptr, int64, 42'i64)
+
+declVolatile(my_incdec_vuint_ptr, uint32, 0'u32)
+declVolatile(my_incdec_vlong_ptr, int64, 0'i64)
 
 let start {.global.} = cpuTime()
 let step_1 {.global.} = start + 0.5
@@ -35,6 +39,8 @@ proc threadAStep1(startAt: float): void =
   atomicStoreFull(my_vshort_ptr, my_short)
   atomicStoreFull(my_vuint_ptr, my_uint)
   atomicStoreFull(my_vlong_ptr, my_long)
+  assert(atomicIncRelaxed(my_incdec_vuint_ptr, 5'u32) == 5'u32)
+  assert(atomicDecRelaxed(my_incdec_vlong_ptr, 5'i64) == -5'i64)
   echo("Thread A done step 1 at " & $cpuTime())
 
 proc threadBStep2(startAt: float): void =
@@ -44,6 +50,8 @@ proc threadBStep2(startAt: float): void =
   assert(atomicLoadFull(my_vshort_ptr) == my_short)
   assert(atomicLoadFull(my_vuint_ptr) == my_uint)
   assert(atomicLoadFull(my_vlong_ptr) == my_long)
+  assert(atomicDecRelaxed(my_incdec_vuint_ptr, 3'u32) == 2'u32)
+  assert(atomicIncRelaxed(my_incdec_vlong_ptr, 3'i64) == -2'i64)
   echo("Thread B starting step 2/2 at " & $cpuTime())
   assert(atomicExchangeFull(my_vbyte_ptr, 0'u8) == my_byte)
   assert(atomicExchangeFull(my_vshort_ptr, 0'i16) == my_short)
