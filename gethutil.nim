@@ -69,7 +69,7 @@ converter toBool*(x: int64): bool = x != 0
 converter toBool*(x: enum): bool = x != 0
 
 converter toBool*(x: pointer): bool = x != nil
-converter toBool*(x: ptr[any]): bool = x != nil
+converter toBool*(x: ptr any): bool = x != nil
 
 converter toBool*(x: Opaque): bool = x != Opaque(0)
 

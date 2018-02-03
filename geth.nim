@@ -3,6 +3,7 @@
 # The Geht Actor System
 
 import gethutil
+import kueues
 
 
 type
@@ -36,7 +37,7 @@ type
   # OTOH, if we use conversations, then we could have more complex (bigger) system/actor IDs. This might allow us
   # to enable a transparent movement of actors accross threads and systems.
   # Basically, a conversation is like a Socket; UDP or TCP? Then resolving an actor ID to a conversation ID is like
-  # a DNS query. The query must contain the actor type. If the actor has a inconpatible type, the query fails.
+  # a DNS query. The query must contain the actor type. If the actor has a incompatible type, the query fails.
   # This allows the sender, on successful query, to know exactly which requests are permited, and presumably defines
   # for each request an ID, so that it can be used over the network.
   # With this design, the system ID could literally be a socket(IPv6?)+port. There must then also be a way such that

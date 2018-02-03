@@ -16,7 +16,7 @@ proc genericAllocAligned*(size: Natural, align: Natural, allocate: proc (size: N
     let mask = int(align-1)
     let offset = if ((p and mask) != 0): (p and mask) else: int(align)
     inc(p, offset)
-    cast[ptr[byte]](p-1)[] = byte(offset)
+    cast[ptr byte](p-1)[] = byte(offset)
     result = cast[pointer](p)
   else:
     result = allocate(size)
@@ -33,7 +33,7 @@ proc genericDeallocAligned*(p: pointer, align: Natural, deallocate: proc (mem: p
   if p != nil:
     if align > WORD_SIZE:
       assert(p != nil)
-      let offset = cast[ptr[byte]](cast[int](p) - 1)[]
+      let offset = cast[ptr byte](cast[int](p) - 1)[]
       let a = cast[pointer](cast[int](p) - cast[int](offset))
       deallocate(a)
     else:

@@ -13,6 +13,7 @@ import options
 import sets
 
 import diktionary
+import tekst
 import vektor
 
 export hash, `==`
@@ -168,6 +169,7 @@ proc register*[K,V](reg: var Register[K,V], key: K, value: V): Registration[K,V]
     result.myid = RegistrationID(reg.list.len)
     reg.list.add(result)
     reg.table[key] = result.myid
+    echo("Registered (" & $key & ", " & $value & ") => " & $result.myid)
 
 iterator items*[K,V](reg: var Register[K,V]): Registration[K,V] {.inline.} =
   ## Returns over all Registrations. reg cannot be nil.

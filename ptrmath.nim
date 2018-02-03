@@ -1,6 +1,6 @@
 # Copyright 2017 Sebastien Diot.
 
-# Shamelessly stolen from Jehan Forum example
+# Shamelessly stolen from Jehan Nim Forum example
 
 template ptrMath*(body: untyped) =
   template `+`*[T](p: ptr T, off: int): ptr T =

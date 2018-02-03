@@ -24,8 +24,13 @@ const USE_URGENT_MARKER* = true
 const MAX_THREADS* = 64
   ## Maximum threads on any CPU we expect to support in the near future.
   ## Must be power-of-two, maximum 256.
+  ##
   ## Why make such a "short term" assumption? Because we are trying to pack
-  ## The procees ID, thread ID, and topic ID in 32-bits...
+  ## The procees ID, thread ID, and topic ID in 16 or 32-bits...
+  ##
+  ## MAX_PROCESSES value is based on MAX_THREADS and MAX_TOPICS. Cluster
+  ## support is active if MAX_PROCESSES > 1. Setting MAX_PROCESSES to 1
+  ## requires defining MAX_TOPICS as 4294967296/MAX_THREADS.
 
 const OUTGOING_MSG_BUFFER_SIZE* = 100
   ## The number of outgoing messages that are buffered, before actually sending
@@ -34,6 +39,12 @@ const OUTGOING_MSG_BUFFER_SIZE* = 100
   ## total buffer size, not per destination.
   ##
   ## Setting this value to 0 disables buffering.
+
+const IMPOSSIBLE_MSG_SIZE*: uint32 = 64*1024*1024
+  ## How big a message is too big? (Only applies across the cluster)
+
+const DEFAULT_CLUSTER_PORT*: uint16 = 12345
+  ## The default cluster port.
 
 type
   MsgSeqIDTypeEnum* = enum
@@ -48,13 +59,17 @@ type
                       # due to the use of an atomic counter.
                       # Also note that 32-bit IDs might not be sufficient for
                       # long running processes.
-    msitPerProcess64  # Each Process has it's own unique 64-bit ID sequence.
+    msitPerProcess64, # Each Process has it's own unique 64-bit ID sequence.
                       # Note that this can have a measurable performance cost,
                       # due to the use of an atomic counter.
-    #msitCluster64    # Message IDs are 64-bit cluster-wide unique.
-                      # NOT CURRENTLY SUPPORTED!
+    msitCluster64     # Message IDs are 64-bit cluster-wide unique.
+                      # This is implemented by combining the "QueueID" with a
+                      # counter. While it is cheap to realise and makes the ID
+                      # unique, it means the ID are NOT globally sorted, which
+                      # would require something like PAXOS.
+                      # CLUSTER_SUPPORT must be true, if chosen.
 
-const MSG_SEQ_ID_TYPE* = MsgSeqIDTypeEnum.msitPerThread32
+const MSG_SEQ_ID_TYPE* = MsgSeqIDTypeEnum.msitPerProcess64
   ## The type of message sequence ID, if any, added to each message.
 
 when USE_TIMESTAMPS:
@@ -67,9 +82,17 @@ when USE_TIMESTAMPS:
       ## The proc returning the current timestamp
       ## Must be defined, if USE_TIMESTAMPS is true.
       ## PLEASE DON'T CHANGE THIS!
+    TimestampValidator* = proc (ts: Timestamp): void {.nimcall.}
+      ## The proc validating an "incomming" timestamp.
+      ## A timestamp more than 1 minute in the past or future should be invalid.
+      ## Must be defined, if USE_TIMESTAMPS is true.
+      ## PLEASE DON'T CHANGE THIS!
 
   import kurrenttime
   let timestampProvider*: TimestampProvider = currentTimeMillis
+    ## Must be defined, if USE_TIMESTAMPS is true.
+    ## Feel free to change the assigned proc.
+  let timestampValidator*: TimestampValidator = checkTimeIsAboutCurrent
     ## Must be defined, if USE_TIMESTAMPS is true.
     ## Feel free to change the assigned proc.
 

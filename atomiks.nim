@@ -52,29 +52,29 @@ when declared(atomicLoadN):
 
   proc atomicLoadFull*[T: AtomType](p: VolatilePtr[T]): T {.inline.} =
     ## This proc implements an atomic load operation. It returns the contents at p.
-    atomicLoadN(cast[ptr[T]](p), ATOMIC_SEQ_CST)
+    atomicLoadN(cast[ptr T](p), ATOMIC_SEQ_CST)
 
   proc atomicStoreFull*[T: AtomType](p: VolatilePtr[T], val: T): void {.inline.} =
     ## This proc implements an atomic store operation. It writes val at p.
-    atomicStoreN(cast[ptr[T]](p), val, ATOMIC_SEQ_CST)
+    atomicStoreN(cast[ptr T](p), val, ATOMIC_SEQ_CST)
 
   proc atomicExchangeFull*[T: AtomType](p: VolatilePtr[T], val: T): T {.inline.} =
     ## This proc implements an atomic exchange operation. It writes val at p,
     ## and returns the previous contents at p.
-    atomicExchangeN(cast[ptr[T]](p), val, ATOMIC_SEQ_CST)
+    atomicExchangeN(cast[ptr T](p), val, ATOMIC_SEQ_CST)
 
   proc atomicCompareExchangeFull*[T: AtomType](p: VolatilePtr[T], expected: ptr T, desired: T): bool {.inline.} =
     ## This proc implements an atomic compare and exchange operation. This compares the
     ## contents at p with the contents at expected and if equal, writes desired at p.
     ## If they are not equal, the current contents at p is written into expected.
     ## True is returned if desired is written at p. False is returned otherwise,
-    atomicCompareExchangeN(cast[ptr[T]](p), expected, desired, false, ATOMIC_SEQ_CST, ATOMIC_RELAXED)
+    atomicCompareExchangeN(cast[ptr T](p), expected, desired, false, ATOMIC_SEQ_CST, ATOMIC_RELAXED)
 
   proc atomicIncRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = cast[T](1)): T =
     ## Increments a volatile (32/64 bit) value, and returns the new value.
     ## Performed in RELAXED/No-Fence memory-model.
     when (sizeof(T) == 8) or (sizeof(T) == 4):
-      cast[T](atomicAddFetch(cast[ptr[T]](p), x, ATOMIC_RELAXED))
+      cast[T](atomicAddFetch(cast[ptr T](p), x, ATOMIC_RELAXED))
     else:
       static: assert(false, "invalid parameter size: " & $sizeof(T))
 
@@ -82,7 +82,7 @@ when declared(atomicLoadN):
     ## Increments a volatile (32/64 bit) value, and returns the new value.
     ## Performed in RELAXED/No-Fence memory-model.
     when (sizeof(T) == 8) or (sizeof(T) == 4):
-      cast[T](atomicSubFetch(cast[ptr[T]](p), x, ATOMIC_RELAXED))
+      cast[T](atomicSubFetch(cast[ptr T](p), x, ATOMIC_RELAXED))
     else:
       static: assert(false, "invalid parameter size: " & $sizeof(T))
 
@@ -259,7 +259,7 @@ elif defined(vcc) and hasThreadSupport:
     else:
       static: assert(false, "invalid parameter size: " & $sizeof(T))
 
-  proc atomicIncRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = 1.int32): T =
+  proc atomicIncRelaxed*[T: AtomType](p: VolatilePtr[T], x: T): T =
     ## Increments a volatile (32/64 bit) value, and returns the new value.
     ## Performed in RELAXED/No-Fence memory-model.
     ## Will only compile on Windows 8+!
@@ -275,7 +275,7 @@ elif defined(vcc) and hasThreadSupport:
       static: assert(false, "invalid parameter size: " & $sizeof(T))
     ]#
 
-  proc atomicDecRelaxed*[T: AtomType](p: VolatilePtr[T], x: T = 1.int32): T =
+  proc atomicDecRelaxed*[T: AtomType](p: VolatilePtr[T], x: T): T =
     ## Increments a volatile (32/64 bit) value, and returns the new value.
     ## Performed in RELAXED/No-Fence memory-model.
     ## Will only compile on Windows 8+!
@@ -290,6 +290,20 @@ elif defined(vcc) and hasThreadSupport:
     else:
       static: assert(false, "invalid parameter size: " & $sizeof(T))
     ]#
+
+  proc atomicIncRelaxed*[T: AtomType](p: VolatilePtr[T]): T {.inline.} =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    ## Performed in RELAXED/No-Fence memory-model.
+    ## Will only compile on Windows 8+!
+    let x: T = 1
+    atomicIncRelaxed(p, x)
+
+  proc atomicDecRelaxed*[T: AtomType](p: VolatilePtr[T]): T {.inline.} =
+    ## Increments a volatile (32/64 bit) value, and returns the new value.
+    ## Performed in RELAXED/No-Fence memory-model.
+    ## Will only compile on Windows 8+!
+    let x: T = 1
+    atomicDecRelaxed(p, x)
 
 else:
   static:

@@ -5,8 +5,14 @@
 import times
 
 var CORRECTION_MILLIS*: int64 = 0
-  ## Maybe you have a cluster, and you somehow want to "improve" to correctness
-  ## of currentTimeMillis() by adding some offset.
+  ## Maybe you use multiple nodes, and you somehow want to "improve" to
+  ## correctness of currentTimeMillis() by adding some offset.
+  ## In a multi-threaded app, it should be set only once before creating threads
+  ## that call currentTimeMillis().
+
+var ACCEPTABLE_ERROR_MILLIS*: int64 = 60000
+  ## When comparing some time to the current time, a difference larger than
+  ## this will cause an exception.
   ## In a multi-threaded app, it should be set only once before creating threads
   ## that call currentTimeMillis().
 
@@ -16,6 +22,16 @@ proc currentTimeMillis*(): int64 =
   # Only a rough solution, until PR https://github.com/nim-lang/Nim/pull/6978
   # is available.
   result = int64(epochTime() * 1000) + CORRECTION_MILLIS
+
+proc checkTimeIsAboutCurrent*(ts: int64): void =
+  ## Checks that the given time is "approximatelly" right, by a margin of 60 seconds.
+  let now = currentTimeMillis()
+  let diff = (now - ts)
+  if diff > ACCEPTABLE_ERROR_MILLIS:
+    raise newException(Exception, "ts too far in the past (" & $diff & " > " & $ACCEPTABLE_ERROR_MILLIS & ")")
+  if diff < -ACCEPTABLE_ERROR_MILLIS:
+    raise newException(Exception, "ts too far in the future (" & $diff & " < -" & $ACCEPTABLE_ERROR_MILLIS & ")")
+
 
 when isMainModule:
   echo("TESTING currentTimeMillis() ...")
