@@ -30,6 +30,8 @@ import tables
 import times
 import typetraits
 
+import moduleinit
+
 import atomiks
 import diktionary
 import typerekjister
@@ -139,7 +141,6 @@ const UNINIT_PROCESS_ID = -1
 let MAX_CPU_THREADS* {.global.} = min(max(countProcessors(), 2), MAX_THREADS)
   ## Maximum threads on this CPU. countProcessors() return cores*2 on Hyper-threading CPUs.
 
-
 when DEBUG_QUEUES:
   echo("THREAD_BITS: " & $THREAD_BITS)
   echo("PROCESS_BITS: " & $PROCESS_BITS)
@@ -177,7 +178,6 @@ when CLUSTER_SUPPORT:
     PeerConnection = object
       ## Represents a peer connection, on the cluster.
       pid: ProcessID
-      sock: AsyncSocket
       domain: Domain
       localAddr: string
       localPort: Port
@@ -187,7 +187,7 @@ when CLUSTER_SUPPORT:
       when MSG_SEQ_ID_PER_PROCESS:
         lastseqid: uint64
       when MSG_SEQ_ID_PER_THREAD:
-        lastseqid: ref[array[uint64,MAX_THREADS]]
+        lastseqid: ref[array[MAX_THREADS,uint64]]
 
     NotAString* = array[256,char]
     ProcessIDToAddress* = proc (pid: ProcessID, port: var Port, address: var NotAString): void {.nimcall,gcSafe.}
@@ -396,6 +396,10 @@ type
       myseqid: MsgSeqID
         ## The message sequence ID.
         ## Should be 4 bytes in this case.
+    when CLUSTER_SUPPORT:
+      mysize: uint32
+        ## The thread that sends the messages does not have access to the
+        ## generic type, and so the size must be stored in the message.
     when USE_TWO_WAY_MESSAGING:
       mysender: QueueID
         ## The message sender. Only defined for two-way messaging.
@@ -442,6 +446,10 @@ when USE_TWO_WAY_MESSAGING:
     ## The message sender. Only defined for two-way messaging.
     assert(msg != nil, "msg cannot be nil")
     msg.mybase.mysender
+
+  proc request*[T](msg: ptr Msg[T]): ptr MsgBase {.inline, noSideEffect.} =
+    ## The request message to which this message answers, if any.
+    msg.mybase.myrequest
 
 when USE_URGENT_MARKER:
   proc urgent*[T](msg: ptr Msg[T]): bool {.inline, noSideEffect.} =
@@ -494,6 +502,74 @@ else:
     ## String representation of a QueueID.
     $pid(queue) & "." & $tid(queue)
 
+proc `$` *(m: ptr MsgBase): string =
+  ## String representation of a MsgBase.
+  if m == nil:
+    return "nil"
+  result = ""
+  var sep = '{'
+  when USE_TWO_WAY_MESSAGING:
+    result = result & sep & "sender: " & $m.mysender
+    sep = ','
+  when USE_TOPICS:
+    result = result & sep & "receiver: " & $m.myreceiver
+    sep = ','
+  when USE_TYPE_ID:
+    result = result & sep & "typeid: " & $m.mytypeid
+    sep = ','
+  when USE_TWO_WAY_MESSAGING:
+    let request =
+      if m.myrequest == nil:
+        "nil"
+      else:
+        $m.myrequest
+    result = result & sep & "request: " & request
+    sep = ','
+  when USE_MSG_SEQ_ID:
+    result = result & sep & "seqid: " & $m.myseqid
+    sep = ','
+  when USE_TIMESTAMPS:
+    result = result & sep & "timestamp: " & $m.mytimestamp
+    sep = ','
+  when USE_URGENT_MARKER:
+    result = result & sep & "urgent: " & $m.myurgent
+    sep = ','
+  result = result & '}'
+
+proc `$` *[T](msg: ptr Msg[T]): string =
+  ## String representation of a Msg.
+  if msg == nil:
+    return "nil"
+  result = $cast[MsgBase](msg).removeSuffix('}')
+  result = result & ",content: " & msg.content & '}'
+
+when USE_THREAD_POOL:
+  type
+    MsgHandler* = proc (m: ptr MsgBase): void {.nimcall.}
+      ## Processes a received message.
+
+    IdleHandler* = proc (milsecs: int, start: float): void {.nimcall,gcSafe.}
+      ## On idle, do something for maximum milsecs milliseconds.
+      ## start ist the cpuTime() just before calling this method.
+
+    ExceptionHandler* = proc (m: ptr MsgBase, e: var Exception, emsg: string): void {.nimcall.}
+      ## Handles an Exception produced while processing a received message.
+
+    ThreadInitParam = object
+      ## The parameter received by the thread-pool thread upon startup
+      id: ThreadID
+        ## The thread ID
+      handler: MsgHandler
+        ## The message handler.
+      idle: IdleHandler
+        ## Called when no message is available
+      error: ExceptionHandler
+        ## The error handler.
+
+
+  var threadPool {.global.}: array[MAX_THREADS,Thread[ThreadInitParam]]
+    ## The thread pool
+
 
 declVolatile(myProcessGlobalID, int, UNINIT_PROCESS_ID)
 # My own (global) process ID
@@ -505,6 +581,10 @@ declVolatile(myClusterPort, uint16, 0'u16)
 # The Port used to communicate over the cluster.
 # It is assumed, that all nodes use the same port.
 
+declVolatile(myProcessKillSwitch, bool, false)
+# Enables you to kill async tasks.
+# Eventually ... they use regular polling.
+
 
 var myLocalThreadID {.threadvar.}: int
   ## My own thread ID
@@ -515,10 +595,14 @@ var myInternalBufferSize {.threadvar.}: int
 
 when USE_TWO_WAY_MESSAGING:
   var myPendingRequests {.threadvar.}: HashSet[ptr MsgBase]
-  myPendingRequests.init()
+
+  proc getPendingRequests(): var HashSet[ptr MsgBase] {.inline.} =
+    if not myPendingRequests.isValid():
+      myPendingRequests.init()
+    myPendingRequests
 
 when USE_OUT_BUFFERS:
-  var myOutgoingBuffer {.threadvar.}: array[0..MAX_THREADS-1, ptr MsgBase]
+  var myOutgoingBuffer {.threadvar.}: array[MAX_THREADS, ptr MsgBase]
     ## Outgoing message buffers; one per thread.
     ## Since we want a compile-time defined array size, we use MAX_THREADS instead of MAX_CPU_THREADS.
   var myOutgoingBufferSize {.threadvar.}: int
@@ -600,6 +684,21 @@ declVolatileArray(threadQueues, ptr MsgBase, MAX_THREADS)
 # Declares a volatile, global array of ptr MsgBase, to serve as message queues.
 # Since we want a compile-time defined array size, we use MAX_THREADS instead of MAX_CPU_THREADS.
 
+when CLUSTER_SUPPORT:
+  declVolatileArray(clusterQueues, ptr MsgBase, MAX_PROCESSES)
+  # Declares a volatile, global array of ptr MsgBase, to serve as cluster message queues.
+
+  declVolatileArray(myPeers, AsyncFD, MAX_PROCESSES)
+  # The peer ProcessID to AsyncFD mapping
+
+  proc getPeer(pid: ProcessID): AsyncFD =
+    ## Returns the "peer" socket for this pid.
+    volatileLoad[AsyncFD](myPeers[int(pid)])
+
+  proc setPeer(pid: ProcessID, socket: AsyncFD) =
+    ## Returns the "peer" socket for this pid.
+    volatileStore[AsyncFD](myPeers[int(pid)], socket)
+
 
 proc flushMsgs*(): void =
   ## Flushes buffered outgoing messages, if any.
@@ -652,8 +751,20 @@ proc sendMsgInternally[T](q: QueueID, m: ptr Msg[T], buffered: bool): void =
   sendMsgInternally(q, cast[ptr MsgBase](m), buffered)
 
 when CLUSTER_SUPPORT:
-  # Forward declaration:
-  proc sendMsgExternally[T](q: QueueID, m: ptr Msg[T], size: uint32) {.async.}
+  proc openPeerConnection(pid: ProcessID): Future[AsyncSocket] {.async.}
+    ## Opens a connection to another peer.
+
+  proc sendMsgExternally[T](q: QueueID, m: ptr Msg[T]) =
+    ## Sends a message "externally", across the cluster. m cannot be nil.
+    let pid = q.pid
+    let cqP = clusterQueues[int(pid)]
+    var msg = cast[ptr MsgBase](m)
+    msg.previous = volatileLoad(cqP)
+    let prevMsgP = addr msg.previous
+    while not atomicCompareExchangeFull(cqP, prevMsgP, msg):
+      discard
+    if int(getPeer(pid)) == 0:
+      asyncCheck openPeerConnection(pid)
 
 proc fillAndSendMsg[T](q: QueueID, m: ptr Msg[T], buffered: bool): void =
   ## Sends a message. m cannot be nil.
@@ -662,7 +773,7 @@ proc fillAndSendMsg[T](q: QueueID, m: ptr Msg[T], buffered: bool): void =
     m.mybase.mysender = myQueueID()
     # New requests (those not replying to something) are tracked.
     if m.mybase.myrequest == nil:
-      myPendingRequests.incl(cast[ptr MsgBase](m))
+      getPendingRequests().incl(cast[ptr MsgBase](m))
   when USE_TOPICS:
     m.mybase.myreceiver = q
   when USE_TIMESTAMPS:
@@ -672,6 +783,9 @@ proc fillAndSendMsg[T](q: QueueID, m: ptr Msg[T], buffered: bool): void =
       m.mybase.myseqid = seqidProvider(m.mybase.mysender)
     else:
       m.mybase.myseqid = seqidProvider(myQueueID())
+  when CLUSTER_SUPPORT:
+    let size = uint32(sizeof(Msg[T]))
+    m.mybase.mysize = size
   if q.pid == myProcessID():
     when USE_URGENT_MARKER:
       m.mybase.myurgent = not buffered
@@ -682,32 +796,34 @@ proc fillAndSendMsg[T](q: QueueID, m: ptr Msg[T], buffered: bool): void =
       when USE_URGENT_MARKER:
         # Assume all cluster messages are urgent ...
         m.mybase.myurgent = true
-      let size = uint32(sizeof(Msg[T]))
       if size > IMPOSSIBLE_MSG_SIZE:
         raise newException(Exception, "Message too big (" & $uint(size) & " bytes)!")
-      asyncCheck sendMsgExternally(q, m, size)
+      sendMsgExternally(q, m)
 
 when USE_TYPE_ID:
-  proc idOfType*(T: typedesc): MsgTypeID {.inline.} =
+  proc idOfType2(T: typedesc): MsgTypeID =
     ## Returns the ID of a type.
     let tid = messageTypeRegister.get(T).id()
     assert(int64(tid) <= int64(high(MsgTypeID)))
-    MsgTypeID(tid)
+    result = MsgTypeID(tid)
+
+  proc idOfType*(T: typedesc): MsgTypeID {.inline.} =
+    ## Returns the ID of a type.
+    let typeidOfT {.global.} = idOfType2(T)
+    result = typeidOfT
 
   proc sendMsg*[T](q: QueueID, m: ptr Msg[T]): void {.inline.} =
     ## Sends a message. m cannot be nil.
-    # TODO Type to make this only-once somehow.
-    #let typeidOfT {.global.} = idOfType(T)
     let typeidOfT = idOfType(T)
     m.mybase.mytypeid = typeidOfT
+    echo("sendMsg[", T.name,"]: ",m.mybase.mytypeid)
     fillAndSendMsg[T](q, m, true)
 
   proc sendMsgNow*[T](q: QueueID, m: ptr Msg[T]): void {.inline.} =
     ## Sends a message immediatly, bypassing any buffer. m cannot be nil.
-    # TODO Type to make this only-once somehow.
-    #let typeidOfT {.global.} = idOfType(T)
     let typeidOfT = idOfType(T)
     m.mybase.mytypeid = typeidOfT
+    echo("sendMsgNow[", T.name,"]: ",m.mybase.mytypeid)
     fillAndSendMsg[T](q, m, false)
 
 else:
@@ -725,14 +841,14 @@ when USE_TWO_WAY_MESSAGING:
     assert(request != nil, "request cannot be nil")
     assert(reply != nil, "reply cannot be nil")
     reply.mybase.myrequest = addr request.mybase
-    sendMsg(request.mybase.mysender, reply)
+    sendMsg[A](request.mybase.mysender, reply)
 
   proc replyNowWith*[Q,A](request: ptr Msg[Q], reply: ptr Msg[A]): void =
     ## Sends a reply message immediatly, bypassing any buffer. request and reply cannot be nil.
     assert(request != nil, "request cannot be nil")
     assert(reply != nil, "reply cannot be nil")
     reply.mybase.myrequest = addr request.mybase
-    sendMsgNow(request.mybase.mysender, reply)
+    sendMsgNow[A](request.mybase.mysender, reply)
 
 when USE_TWO_WAY_MESSAGING:
   proc validateRequest(msg: ptr MsgBase): bool =
@@ -740,14 +856,14 @@ when USE_TWO_WAY_MESSAGING:
     let r = cast[ptr MsgBase](msg.myrequest)
     if r != nil:
       # We got a reply to something.
-      result = myPendingRequests.contains(r)
-      myPendingRequests.excl(r)
+      result = getPendingRequests().contains(r)
+      getPendingRequests().excl(r)
     else:
       result = true
 
   proc replyPending*[T](m: ptr Msg[T]): bool =
     ## Is m one of our requests, for which a reply is pending?
-    myPendingRequests.contains(cast[ptr MsgBase](m))
+    getPendingRequests().contains(cast[ptr MsgBase](m))
 
 proc collectReceived(msg: ptr MsgBase, collected: var seq[ptr MsgBase]) =
   ## Follow the linked list of messages, adding each valid message to collected.
@@ -768,7 +884,15 @@ proc recvMsgs*(): seq[ptr MsgBase] =
   let tqP = threadQueues[int(myThreadID())]
   collectReceived(atomicExchangeFull(tqP, nil), result)
 
-proc recvMsgs*(waitInSecs: float, wait: proc (s: int): void = sleep): seq[ptr MsgBase] =
+proc idleFor(milsecs: int, start: float): void {.gcSafe.} =
+  ## "Idle" run GC or sleep, for about the given time.
+  GC_step(milsecs*1000)
+  let gcTime = int((cpuTime() - start)/1000.0)
+  let sleepTime = milsecs - gcTime
+  if sleepTime > 0:
+    sleep(milsecs)
+
+proc recvMsgs*(waitInSecs: float, wait: proc (milsecs: int, start: float): void = idleFor): seq[ptr MsgBase] =
   ## Receives messages from the own queue, if any.
   ## Returns messages in *reverse* order of arrival.
   if myInternalBufferSize > 0:
@@ -785,9 +909,11 @@ proc recvMsgs*(waitInSecs: float, wait: proc (s: int): void = sleep): seq[ptr Ms
     var m = atomicExchangeFull(tqP, nil)
     if waitInSecs > 0:
       # Warning: No locks; busy wait!
-      while (m == nil) and (cpuTime() < until):
-        wait(slp)
+      var now = cpuTime()
+      while (m == nil) and (now < until):
+        wait(slp, now)
         m = atomicExchangeFull(tqP, nil)
+        now = cpuTime()
     result = newSeq[ptr MsgBase](0)
     collectReceived(m, result)
 
@@ -802,18 +928,72 @@ proc initProcessPID(pid: ProcessID): void =
   if not atomicCompareExchangeFull(myProcessGlobalID, prevPID, int(pid)):
     raise newException(Exception, "ProcessID already initialised: " & $expectedPID)
 
-when CLUSTER_SUPPORT:
-  var myPeers: TableRef[ProcessID, AsyncSocket]
-    ## The peer ProcessID to AsyncSocket map
+proc deinitProcessID(): void =
+  ## De-iInitialises the process PID!
+  atomicStoreFull(myProcessGlobalID, UNINIT_PROCESS_ID)
 
+proc live*(): bool {.inline.} =
+  ## Should the process carry on?
+  not volatileLoad(myProcessKillSwitch)
+
+proc die*(): void =
+  ## Tells the process to terminate.
+  volatileStore(myProcessKillSwitch,true)
+
+when USE_THREAD_POOL:
+  proc onError(m: ptr MsgBase, e: var Exception, emsg: string) =
+    echo("Error ",repr(e)," while processing message ",m,": ",emsg)
+
+  proc runThread(init: ThreadInitParam) {.thread.} =
+    ## Runs a thread of the thread-pool.
+    initThreadID(init.id)
+    echo("Thread " & $init.id & " initialised.")
+    let handler = init.handler
+    let idle = init.idle
+    let error = init.error
+    while live():
+      for i in 1..10:
+        for m in recvMsgs(0.1, idle):
+          try:
+            handler(m)
+          except:
+            let e = getCurrentException()
+            let emsg = getCurrentExceptionMsg()
+            error(m, e, emsg)
+
+  proc initThreadPool(handler: MsgHandler, idle: IdleHandler, error: ExceptionHandler) =
+    ## Initialises the thread pool.
+    if handler == nil:
+      raise newException(Exception, "handler cannot be nil")
+    var init: ThreadInitParam
+    init.handler = handler
+    init.idle =
+      if idle == nil:
+        idleFor
+      else:
+        idle
+    init.error =
+      if error == nil:
+        onError
+      else:
+        error
+    for i in 0..<MAX_CPU_THREADS:
+      init.id = ThreadID(i)
+      when USE_PIN_TO_CPU:
+        pinToCpu[ThreadInitParam](threadPool[i], i)
+      createThread[ThreadInitParam](threadPool[i], runThread, init)
+    echo("Thread pool initialised.")
+
+  proc closeThreadPool() =
+    ## Tells all the threads to terminate
+    echo("Closing thread pool ...")
+    for i in 0..<MAX_CPU_THREADS:
+      joinThread(threadPool[i])
+    echo("Thread pool closed.")
+
+when CLUSTER_SUPPORT:
   var runForeverThreadThread: Thread[tuple[port: Port, address: NotAString]]
     ## The thread of "asyncdispatch".
-
-  proc peers(): TableRef[ProcessID, AsyncSocket] =
-    ## Returns the "peers" table.
-    if myPeers == nil:
-      myPeers = newTable[ProcessID, AsyncSocket]()
-    result = myPeers
 
   proc descSocket(asock: AsyncSocket): string =
     ## Describe a socket for logging purpose.
@@ -847,29 +1027,33 @@ when CLUSTER_SUPPORT:
     result.remoteAddr = remoteAddr
     result.remotePort = remotePort
     result.pid = peerProcess
-    result.sock = asock
     when MSG_SEQ_ID_PER_THREAD:
-      result.lastseqid = new array[uint64,MAX_THREADS]
+      result.lastseqid = new array[MAX_THREADS,uint64]
     result.valid = true
 
-  proc closePeer(peerProcess: ProcessID, peer: AsyncSocket) =
+  proc closePeer(peerProcess: ProcessID) =
     ## Closes a peer process, if connected.
-    var sock = peer
-    if peers().take(peerProcess, sock):
-      if peerProcess != myProcessID():
-        echo("Closing peer " & $peerProcess & "; " & descSocket(sock))
-    if sock != nil:
+    var peer = getPeer(peerProcess)
+    if peer != AsyncFD(0):
+      echo("Closing peer " & $peerProcess)
+      setPeer(peerProcess, AsyncFD(0))
       try:
-        sock.close()
+        closeSocket(peer)
       except:
         discard
 
-  proc registerPeer(peer: PeerConnection) =
+  proc registerPeer(peer: PeerConnection, sock: AsyncSocket) =
     ## Reads one message from the peer.
-    # Just in case ...
-    closePeer(peer.pid, nil)
-    echo("Peer " & $peer & " connected.")
-    peers()[peer.pid] = peer.sock
+    echo("Peer " & $peer & " connected: (", descSocket(sock),")")
+    setPeer(peer.pid, sock.getFd().AsyncFD)
+
+  proc closeAllPeers() =
+    ## Closes all running peers.
+    let me = myProcessID()
+    for p in 0..<MAX_PROCESSES:
+      let pid = ProcessID(p)
+      if me != pid:
+        closePeer(pid)
 
   proc readUint32(peer: AsyncSocket): Future[uint32] {.async.} =
     # Reads a "network order" uint32 from the socket.
@@ -926,32 +1110,33 @@ when CLUSTER_SUPPORT:
               raise newException(Exception, "Wrong Message seq ID! Expected: " &
                 $(lastseqid + 1) & ", but received: " & $msg.myseqid)
 
-  # Forward decalaration:
-  proc openPeerConnection(pid: ProcessID): Future[AsyncSocket] {.async.}
+  proc forwardMsgToCluster(pid: ProcessID, sock: AsyncSocket) {.async.} =
+    ## Forward messages to the cluster.
+    let cqP = clusterQueues[int(pid)]
+    var last = atomicExchangeFull(cqP, nil)
+    if last != nil:
+      # Sort messages in correct order
+      var collected = newSeq[ptr MsgBase]()
+      var m = last
+      while m != nil:
+        collected.add(m)
+        m = m.previous
+      # Send them
+      for m in collected:
+        await writeUint32(sock, m.mysize)
+        let expected = int(m.mysize - MSG_PREVIOUS_OVERHEAD)
+        var msgData = cast[pointer](cast[ByteAddress](m) +% MSG_PREVIOUS_OVERHEAD)
+        await sock.send(msgData, expected)
 
-  proc sendMsgExternally[T](q: QueueID, m: ptr Msg[T], size: uint32) {.async.} =
-    ## Sends a message "externally", across the cluster. m cannot be nil.
-    # Note: this proc needed to be "forward declared".
-    let pid = q.pid
-    var sock: AsyncSocket
-    sock = peers()[pid]
-    if sock == nil:
-      sock = await openPeerConnection(pid)
-    await writeUint32(sock, size)
-    let expected = int(size - MSG_PREVIOUS_OVERHEAD)
-    var msgData = cast[pointer](cast[ByteAddress](m) +% MSG_PREVIOUS_OVERHEAD)
-    await sock.send(msgData, expected)
-
-  proc readMsg(peer: PeerConnection): Future[uint64] {.async.} =
+  proc readMsg(peer: PeerConnection, sock: AsyncSocket, size: uint32): Future[uint64] {.async.} =
     ## Reads one message from the peer.
-    var size = await readUint32(peer.sock)
     if size > IMPOSSIBLE_MSG_SIZE:
       raise newException(Exception, "Message too big (" & $size & " bytes)!")
     var msg = allocShared0(size)
     try:
       let expected = int(size - MSG_PREVIOUS_OVERHEAD)
       var msgData = cast[pointer](cast[ByteAddress](msg) +% MSG_PREVIOUS_OVERHEAD)
-      let bytesRead = await peer.sock.recvInto(msgData, expected)
+      let bytesRead = await sock.recvInto(msgData, expected)
       if (bytesRead < 0) or (bytesRead != expected):
         raise newException(Exception, "Fail to read full message (" & $size & " bytes)!")
       var msg2 = cast[ptr MsgBase](msg)
@@ -959,7 +1144,7 @@ when CLUSTER_SUPPORT:
       when USE_TOPICS:
         receiver = msg2.myreceiver
       else:
-        receiver = QueueID(await readUint32(peer.sock))
+        receiver = QueueID(await readUint32(sock))
       validateReadMsg(peer, msg2, receiver)
       when USE_MSG_SEQ_ID:
         result = uint64(msg2.myseqid)
@@ -970,32 +1155,42 @@ when CLUSTER_SUPPORT:
         # Failure! Prevent memory leaks!
         deallocShared(msg)
 
-  proc processPeerLoop(pc: PeerConnection) {.async.} =
+  proc processPeerReadLoop(pc: PeerConnection, sock: AsyncSocket) {.async.} =
     ## Processes a cluster peer connection (needed due to compiler bug).
     var peer = pc
-    let loop = peer.valid
+    var loop = peer.valid
     while loop:
-      when USE_MSG_SEQ_ID:
-        # Update lastseqid of PeerConnection
-        peer.lastseqid = await readMsg(peer)
-      else:
-        await readMsg(peer)
+      var readFut = readUint32(sock)
+      while loop and not await readFut.withTimeout(10):
+        await forwardMsgToCluster(peer.pid, sock)
+        loop = live()
+      if loop:
+        let size = await readFut
+        when USE_MSG_SEQ_ID:
+          # Update lastseqid of PeerConnection
+          peer.lastseqid = await readMsg(peer, sock, size)
+        else:
+          discard await readMsg(peer, sock, size)
+        loop = live()
 
   proc processPeer(sock: AsyncSocket) {.async.} =
     ## Processes a cluster peer connection
     let myProc = myProcessID()
     var peer: PeerConnection
     try:
-      let magic = await readUint32(peer.sock)
-      let version = await readUint32(peer.sock)
-      let procid = await readUint32(peer.sock)
+      await sock.writeUint32(MAGIC)
+      await sock.writeUint32(VERSION)
+      await sock.writeUint32(uint32(myProc))
+      let magic = await readUint32(sock)
+      let version = await readUint32(sock)
+      let procid = await readUint32(sock)
       if (magic == MAGIC) and (version == VERSION) and (procid <= high(ProcessID)) and
         (procid != uint32(myProc)) and (procid != uint32(myProc)):
         peer = initPeerConnection(ProcessID(procid), sock)
-        registerPeer(peer)
-      await processPeerLoop(peer)
+        registerPeer(peer, sock)
+      await processPeerReadLoop(peer, sock)
     finally:
-      closePeer(peer.pid, sock)
+      closePeer(peer.pid)
 
   proc mapPID2Address(pid: ProcessID): (string, Port) {.gcSafe.} =
     ## Opens a connection to another peer.
@@ -1010,34 +1205,61 @@ when CLUSTER_SUPPORT:
 
   proc openPeerConnection(pid: ProcessID): Future[AsyncSocket] {.async.} =
     ## Opens a connection to another peer.
+    # NB: This proc has a forward declaration.
     let (address, port) = mapPID2Address(pid)
     if (address == nil) or (len(address) == 0):
       raise newException(Exception, "Process Mapper returned empty address for ProcessID: " & $pid)
     let sock = await asyncnet.dial(address, port)
-    await sock.writeUint32(MAGIC)
-    await sock.writeUint32(VERSION)
-    await sock.writeUint32(uint32(myProcessID()))
     asyncCheck processPeer(sock)
     result = sock
 
   proc initCluster(port: Port, address: string) {.async.} =
     ## Initiates the cluster networking.
+    echo("Opening server socket...", getThreadId())
     var server = newAsyncSocket()
     server.setSockOpt(OptReuseAddr, true)
     server.bindAddr(port, address)
     server.listen()
 
-    while true:
-      let peer = await server.accept()
-      asyncCheck processPeer(peer)
+    var loop = true
+    while loop:
+      let accept = server.accept()
+      while loop and not await accept.withTimeout(1000):
+        loop = live()
+      if loop:
+        let peer = await accept
+        asyncCheck processPeer(peer)
+
+    echo("Closing server socket...")
+    try:
+      server.close()
+    except:
+      discard
 
   proc runForeverThread(t: tuple[port: Port, address: NotAString]) {.thread.} =
     ## Executes runForever() in a separate thread.
     asyncCheck initCluster(t.port, $t.address)
     runForever()
 
-  proc initProcess*(pid: ProcessID, processMapper: ProcessIDToAddress): void =
+type
+  ProcessConfig* = object
+    ## Configuration parameter for initProcess()
+    pid*: ProcessID
+      ## The process ID of this process.
+    when CLUSTER_SUPPORT:
+      processMapper*: ProcessIDToAddress
+        ## Maps process IDs to network addresses
+    when USE_THREAD_POOL:
+      handler: MsgHandler
+        ## The message handler.
+      idle: IdleHandler
+        ## Called when no message is available
+
+when CLUSTER_SUPPORT:
+  proc initProcess*(cfg: ProcessConfig): void =
     ## Initialises the process. Must be called exactly once!
+    let pid = cfg.pid
+    let processMapper = cfg.processMapper
     if processMapper == nil:
       raise newException(Exception, "processMapper cannot be nil")
     initProcessPID(pid)
@@ -1057,8 +1279,31 @@ when CLUSTER_SUPPORT:
     let prevClusterPort = addr expectedClusterPort
     if not atomicCompareExchangeFull(myClusterPort, prevClusterPort, uint16(port)):
       raise newException(Exception, "Cluster Port already initialised")
+    when USE_THREAD_POOL:
+      initThreadPool(cfg.handler, cfg.idle)
     createThread(runForeverThreadThread, runForeverThread, (port, address))
 else:
-  proc initProcess*(pid: ProcessID): void =
+  proc initProcess*(cfg: ProcessConfig): void =
     ## Initialises the process. Must be called exactly once!
+    let pid = cfg.pid
     initProcessPID(pid)
+    when USE_THREAD_POOL:
+      initThreadPool(cfg.handler, cfg.idle)
+
+proc terminateProcess*(): void =
+  ## Does any required cleanup to terminate the process.
+  die()
+  when CLUSTER_SUPPORT:
+    closeAllPeers()
+  when USE_THREAD_POOL:
+    closeThreadPool()
+  deinitProcessID()
+
+proc level0InitModuleKueues*(): void =
+  ## Module registration
+  # TODO Add init procs
+  if registerModule("kueues", "kueues_config", "atomiks", "diktionary", "typerekjister"):
+    level0InitModuleKueues_config()
+    level0InitModuleAtomiks()
+    level0InitModuleDiktionary()
+    level0InitModuleTyperekjister()

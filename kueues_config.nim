@@ -1,5 +1,7 @@
 # Copyright 2017 Sebastien Diot.
 
+import moduleinit
+
 # Defines compilation parameters for kueues.
 
 const DEBUG_QUEUES* = false
@@ -20,6 +22,9 @@ const USE_TWO_WAY_MESSAGING* = true
 
 const USE_URGENT_MARKER* = true
   ## Do we track which message were sent with sendMsgNow()/replyNowWith()?
+
+const USE_THREAD_POOL* = false
+  ## Do we create our own thread-pool?
 
 const MAX_THREADS* = 64
   ## Maximum threads on any CPU we expect to support in the near future.
@@ -110,3 +115,13 @@ else:
   # In this case, MAX_PROCESSES (the maximum number of running process in the
   # cluster) will be 65536/MAX_THREADS.
   discard
+
+when USE_THREAD_POOL:
+
+  const USE_PIN_TO_CPU* = true
+    ## Do we call pinToCpu() on each thread-pool thread?
+
+proc level0InitModuleKueues_config*(): void =
+  ## Module registration
+  if registerModule("kueues_config", "kurrenttime"):
+    level0InitModuleKurrenttime()

@@ -7,6 +7,8 @@ import typetraits
 import hashes
 import options
 
+import moduleinit
+
 import rekjister
 import tekst
 
@@ -105,6 +107,12 @@ proc get*[M](reg: var TypeRegister[M], T: typedesc): TypeInfo[M] {.inline.} =
       raise newException(Exception, "TypeRegister is frozen!")
     # Must be there now!
     return reg.find(T).get
+
+proc level0InitModuleTyperekjister*(): void =
+  ## Module registration
+  if registerModule("typerekjister", "rekjister", "tekst"):
+    level0InitModuleRekjister()
+    level0InitModuleTekst()
 
 when isMainModule:
   import threadpool

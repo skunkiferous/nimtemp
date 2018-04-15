@@ -6,6 +6,8 @@
 
 import math
 
+import moduleinit
+
 type
   # TODO Find a way to make the type restriction be recursive
   SharedArray*[T: not (ref|seq|string)] = ptr object
@@ -356,6 +358,10 @@ proc concat*[T](sas: varargs[SharedArray[T]]): SharedArray[T] =
     for val in sa:
       result[i] = val
       inc(i)
+
+proc level0InitModuleVektor*(): void =
+  ## Module registration
+  discard registerModule("vektor")
 
 when isMainModule:
   echo("TESTING SharedArray ...")

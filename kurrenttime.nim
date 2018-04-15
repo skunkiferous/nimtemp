@@ -4,6 +4,8 @@
 
 import times
 
+import moduleinit
+
 var CORRECTION_MILLIS*: int64 = 0
   ## Maybe you use multiple nodes, and you somehow want to "improve" to
   ## correctness of currentTimeMillis() by adding some offset.
@@ -32,6 +34,9 @@ proc checkTimeIsAboutCurrent*(ts: int64): void =
   if diff < -ACCEPTABLE_ERROR_MILLIS:
     raise newException(Exception, "ts too far in the future (" & $diff & " < -" & $ACCEPTABLE_ERROR_MILLIS & ")")
 
+proc level0InitModuleKurrenttime*(): void =
+  ## Module registration
+  discard registerModule("kurrenttime")
 
 when isMainModule:
   echo("TESTING currentTimeMillis() ...")

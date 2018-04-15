@@ -12,6 +12,8 @@ import math
 import options
 import sets
 
+import moduleinit
+
 import diktionary
 import tekst
 import vektor
@@ -179,6 +181,13 @@ iterator items*[K,V](reg: var Register[K,V]): Registration[K,V] {.inline.} =
     values = @a
   for r in values:
     yield r
+
+proc level0InitModuleRekjister*(): void =
+  ## Module registration
+  if registerModule("rekjister", "diktionary", "tekst", "vektor"):
+    level0InitModuleDiktionary()
+    level0InitModuleTekst()
+    level0InitModuleVektor()
 
 when isMainModule:
   echo("TESTING Register ...")

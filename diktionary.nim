@@ -101,6 +101,8 @@
 import
   hashes, math
 
+import moduleinit
+
 import vektor
 
 include "system/inclrtl"
@@ -1322,8 +1324,16 @@ proc merge*[A](s, t: SharedCountTablePtr[A]) =
   ## merges the second table into the first one
   s[].merge(t[])
 
+proc level0InitModuleDiktionary*(): void =
+  ## Module registration
+  if registerModule("diktionary", "vektor"):
+    level0InitModuleVektor()
+
 
 when isMainModule:
+  proc c_strcmp(a, b: cstring): cint {.
+    importc: "strcmp", header: "<string.h>", noSideEffect.}
+
   echo("TESTING SharedTable ...")
   # The original tests are based on "string"s, but we cannot use that, since cannot be used in the shared heap.
   type
@@ -1350,7 +1360,7 @@ when isMainModule:
     result = $s.mystr
 
   proc `==`(a, b: STRING): bool =
-    (a.myhash == b.myhash) and (cmp(a.mystr, b.mystr) == 0)
+    (a.myhash == b.myhash) and (c_strcmp(a.mystr, b.mystr) == 0)
 
   type
     Person = object

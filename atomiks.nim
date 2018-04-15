@@ -1,5 +1,7 @@
 # Copyright 2017 Sebastien Diot.
 
+import moduleinit
+
 {.experimental.}
 
 from volatile import nil
@@ -310,3 +312,7 @@ else:
     echo("COMPILING WITHOUT ANY KNOWN THREADS!")
   # XXX fixme
   discard
+
+proc level0InitModuleAtomiks*(): void =
+  ## Module registration
+  discard registerModule("atomiks")

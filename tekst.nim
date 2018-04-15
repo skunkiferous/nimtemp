@@ -1,14 +1,18 @@
 # Copyright 2017 Sebastien Diot.
 
-import hashes
-
-export hash, `==`
-
 ## This module can be used, when using "text" as a table key (both hashed and
 ## sorted), stored on the shared heap. One can create a SharedText using a
 ## "local" cstring, so that no shared heap allocation is needed to query a
 ## table by key.
 
+import hashes
+
+import moduleinit
+
+export hash, `==`
+
+proc c_strcmp(a, b: cstring): cint {.
+  importc: "strcmp", header: "<string.h>", noSideEffect.}
 
 const
   EMPTY: cstring = ""
@@ -43,27 +47,27 @@ proc cstr*(st: SharedText): cstring {.inline.} =
 
 proc `==`*(a, b: SharedText): bool {.inline, noSideEffect.} =
   ## Compares SharedTexts
-  (a.txthash == b.txthash) and (a.len == b.len) and (cmp(a.txt, b.txt) == 0)
+  (a.txthash == b.txthash) and (a.len == b.len) and (c_strcmp(a.txt, b.txt) == 0)
 
 proc `==`*(st: SharedText, cs: cstring): bool {.inline, noSideEffect.} =
   ## Compares a SharedText to a cstring
   let p = cast[pointer](cs)
   let cs2 = if (p == nil) or (p == cast[pointer](EMPTY)): EMPTY else: cs
-  result = (cmp(st.txt, cs2) == 0)
+  result = (c_strcmp(st.txt, cs2) == 0)
 
 proc `==`*(cs: cstring, st: SharedText): bool {.inline, noSideEffect.} =
   ## Compares a SharedText to a cstring
   let p = cast[pointer](cs)
   let cs2 = if (p == nil) or (p == cast[pointer](EMPTY)): EMPTY else: cs
-  result = (cmp(st.txt, cs2) == 0)
+  result = (c_strcmp(st.txt, cs2) == 0)
 
 proc `<`*(a, b: SharedText): bool {.inline, noSideEffect.} =
   ## Compares SharedTexts
-  (cmp(a.txt, b.txt) < 0)
+  (c_strcmp(a.txt, b.txt) < 0)
 
 proc `<=`*(a, b: SharedText): bool {.inline, noSideEffect.} =
   ## Compares SharedTexts
-  (cmp(a.txt, b.txt) <= 0)
+  (c_strcmp(a.txt, b.txt) <= 0)
 
 proc copyCString(s: cstring): cstring {.inline.} =
   ## Creates a copy of a cstring into the shared-heap
@@ -104,6 +108,10 @@ proc deinitSharedText*(st: var SharedText): void {.inline.} =
   st.txt = EMPTY
   st.txtlen = 0
   st.txthash = 0
+
+proc level0InitModuleTekst*(): void =
+  ## Module registration
+  discard registerModule("tekst")
 
 when isMainModule:
   echo("TESTING SharedText ...")
